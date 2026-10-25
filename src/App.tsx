@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Download,
-  Printer,
   Plus,
   Trash2,
   RotateCcw,
@@ -9,13 +8,14 @@ import {
   CheckCircle2,
   Receipt,
   Loader2,
+  Image as ImageIcon,
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import { InvoiceData, InvoiceItem } from './types/invoice';
 import { numberToArabicWords } from './utils/tafqeet';
 
-const STORAGE_KEY = 'ayman_noshy_system_invoice_v2';
+const STORAGE_KEY = 'ayman_noshy_system_invoice_v3';
 
 const getTodayDate = (): string => {
   const today = new Date();
@@ -49,6 +49,7 @@ const getDefaultInvoice = (): InvoiceData => ({
 export default function App() {
   const invoiceRef = useRef<HTMLDivElement>(null);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
 
   const [invoice, setInvoice] = useState<InvoiceData>(() => {
@@ -161,22 +162,63 @@ export default function App() {
 
   const showToast = (msg: string) => {
     setNoticeMessage(msg);
-    setTimeout(() => setNoticeMessage(null), 4500);
+    setTimeout(() => setNoticeMessage(null), 5000);
   };
 
-  // Direct Automatic PDF Download (ينزل الفاتورة تلقائي على الموبايل والكمبيوتر)
+  // Helper to capture the invoice as a pristine, high-resolution canvas
+  const captureInvoiceCanvas = async (): Promise<HTMLCanvasElement | null> => {
+    if (!invoiceRef.current) return null;
+    const element = invoiceRef.current;
+
+    return await html2canvas(element, {
+      scale: 2.5,
+      useCORS: true,
+      allowTaint: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      onclone: (clonedDoc) => {
+        const clonedElement = clonedDoc.getElementById('printable-invoice');
+        if (clonedElement) {
+          // Standard A4 width at 96 DPI is 794px. Locking width ensures perfect proportion on all devices (mobile & PC)
+          clonedElement.style.width = '794px';
+          clonedElement.style.maxWidth = '794px';
+          clonedElement.style.minWidth = '794px';
+          clonedElement.style.boxSizing = 'border-box';
+          clonedElement.style.padding = '24px';
+          clonedElement.style.backgroundColor = '#ffffff';
+
+          // Convert all form inputs into pure typography so they render crisply without outlines
+          const inputs = clonedElement.querySelectorAll('input, textarea');
+          inputs.forEach((inp) => {
+            const inputEl = inp as HTMLInputElement | HTMLTextAreaElement;
+            const span = clonedDoc.createElement('span');
+            span.textContent = inputEl.value || '';
+            span.style.fontWeight = '700';
+            span.style.color = '#0f172a';
+            span.style.display = 'inline-block';
+            span.style.fontSize = 'inherit';
+            span.style.fontFamily = 'inherit';
+            inputEl.parentNode?.replaceChild(span, inputEl);
+          });
+
+          // Hide action icons and buttons
+          const noPrints = clonedElement.querySelectorAll('.no-print');
+          noPrints.forEach((el) => {
+            (el as HTMLElement).style.display = 'none';
+          });
+        }
+      },
+    });
+  };
+
+  // Direct Automatic PDF Download (تحميل مباشر للملف دون أي نوافذ طباعة)
   const handleDownloadPdf = async () => {
-    if (!invoiceRef.current) return;
+    if (isGeneratingPdf || isGeneratingImage) return;
     setIsGeneratingPdf(true);
 
     try {
-      const element = invoiceRef.current;
-      const canvas = await html2canvas(element, {
-        scale: 2.2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: '#ffffff',
-      });
+      const canvas = await captureInvoiceCanvas();
+      if (!canvas) throw new Error('Canvas capture failed');
 
       const imgData = canvas.toDataURL('image/jpeg', 0.95);
       const pdf = new jsPDF({
@@ -185,32 +227,77 @@ export default function App() {
         format: 'a4',
       });
 
-      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfWidth = 210; // A4 standard width (mm)
       const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
 
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
-      
+
       const fileName = `فاتورة_${invoice.invoiceType === 'sale' ? 'بيع' : 'شراء'}_ايمن_نصحي_${invoice.invoiceNumber || '001'}.pdf`;
+
+      // Trigger direct download
       pdf.save(fileName);
-      showToast(`تم تنزيل الفاتورة تلقائياً: ${fileName}`);
+
+      // Mobile anchor fallback to guarantee automatic file download
+      try {
+        const blob = pdf.output('blob');
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          document.body.removeChild(link);
+          URL.revokeObjectURL(blobUrl);
+        }, 1500);
+      } catch {
+        // pdf.save already handled it
+      }
+
+      showToast(`تم تنزيل الفاتورة مباشرة بنجاح: ${fileName}`);
     } catch (err) {
-      console.error('PDF error:', err);
-      // Fallback to browser print dialog
-      window.print();
+      console.error('Direct PDF download error:', err);
+      showToast('حدث خطأ أثناء تنزيل الفاتورة، جاري المحاولة كصورة عالية الدقة...');
+      handleDownloadImage();
     } finally {
       setIsGeneratingPdf(false);
     }
   };
 
-  // Direct print window
-  const handlePrint = () => {
-    window.print();
+  // Direct High-Resolution Image Download (PNG مباشر)
+  const handleDownloadImage = async () => {
+    if (isGeneratingImage) return;
+    setIsGeneratingImage(true);
+
+    try {
+      const canvas = await captureInvoiceCanvas();
+      if (!canvas) throw new Error('Canvas capture failed');
+
+      const imgData = canvas.toDataURL('image/png');
+      const fileName = `فاتورة_${invoice.invoiceType === 'sale' ? 'بيع' : 'شراء'}_ايمن_نصحي_${invoice.invoiceNumber || '001'}.png`;
+
+      const link = document.createElement('a');
+      link.href = imgData;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        document.body.removeChild(link);
+      }, 1500);
+
+      showToast(`تم تنزيل صورة الفاتورة مباشرة: ${fileName}`);
+    } catch (err) {
+      console.error('Direct Image download error:', err);
+      showToast('تعذر تنزيل الملف، يرجى المحاولة مرة أخرى.');
+    } finally {
+      setIsGeneratingImage(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-slate-100/90 text-slate-900 pb-24 md:pb-12 print:bg-white print:p-0 print:m-0 print:pb-0">
+    <div className="min-h-screen bg-slate-100/90 text-slate-900 pb-24 md:pb-12">
       
-      {/* Top System Bar - Hidden during print */}
+      {/* Top System Bar */}
       <header className="no-print bg-slate-900 text-white sticky top-0 z-40 border-b border-slate-800 shadow-md">
         <div className="max-w-4xl mx-auto px-3 py-2.5 sm:px-4 flex items-center justify-between gap-2">
           
@@ -228,18 +315,20 @@ export default function App() {
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 hidden sm:block">
-                إنشاء وتنزيل فواتير البيع والشراء بالجنيه المصري (PDF تلقائي)
+                تنزيل فواتير البيع والشراء مباشرة بالجنيه المصري (PDF مباشر)
               </p>
             </div>
           </div>
 
           {/* Action buttons header */}
           <div className="flex items-center gap-1.5 sm:gap-2">
+            
+            {/* Primary Direct Download Button (PDF) */}
             <button
               onClick={handleDownloadPdf}
-              disabled={isGeneratingPdf}
+              disabled={isGeneratingPdf || isGeneratingImage}
               type="button"
-              className="cursor-pointer inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-lg shadow-sm active:scale-95 transition disabled:opacity-70"
+              className="cursor-pointer inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-3.5 py-1.5 sm:py-2 rounded-lg shadow-sm active:scale-95 transition disabled:opacity-70"
               title="تنزيل الفاتورة مباشرة بصيغة PDF على جهازك"
             >
               {isGeneratingPdf ? (
@@ -250,31 +339,39 @@ export default function App() {
               ) : (
                 <>
                   <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                  <span>تنزيل PDF تلقائي</span>
+                  <span>تحميل PDF مباشر</span>
                 </>
               )}
             </button>
 
+            {/* Secondary Direct Download Button (PNG Image) */}
             <button
-              onClick={handlePrint}
+              onClick={handleDownloadImage}
+              disabled={isGeneratingPdf || isGeneratingImage}
               type="button"
-              className="cursor-pointer inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-1.5 sm:py-2 rounded-lg border border-slate-700 transition"
-              title="فتح نافذة الطباعة"
+              className="cursor-pointer hidden sm:inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-2 rounded-lg border border-slate-700 transition disabled:opacity-60"
+              title="تنزيل الفاتورة مباشرة كصورة عالية الدقة PNG"
             >
-              <Printer className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">طباعة</span>
+              {isGeneratingImage ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ImageIcon className="w-3.5 h-3.5 text-slate-300" />
+              )}
+              <span>تحميل كصورة</span>
             </button>
 
+            {/* Quick Example */}
             <button
               onClick={handleResetToExample}
               type="button"
-              className="cursor-pointer inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2 py-1.5 rounded-lg border border-slate-700 transition"
+              className="cursor-pointer inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2.5 py-1.5 sm:py-2 rounded-lg border border-slate-700 transition"
               title="تعبئة مثال تجريبي"
             >
               <Sparkles className="w-3 h-3 text-amber-400" />
               <span className="hidden md:inline">مثال</span>
             </button>
 
+            {/* New Invoice */}
             <button
               onClick={handleClearInvoice}
               type="button"
@@ -289,7 +386,7 @@ export default function App() {
       </header>
 
       {/* Main Container */}
-      <main className="max-w-4xl mx-auto px-2 sm:px-4 pt-3 sm:pt-5 print:max-w-none print:p-0 print:m-0">
+      <main className="max-w-4xl mx-auto px-2 sm:px-4 pt-3 sm:pt-5">
         
         {/* Toast feedback */}
         {noticeMessage && (
@@ -307,7 +404,7 @@ export default function App() {
           </div>
         )}
 
-        {/* System Settings & Quick Toggles (Clean, Compact, Mobile-Optimized) */}
+        {/* System Settings & Quick Toggles */}
         <div className="no-print mb-3 bg-white border border-slate-200 rounded-xl p-2.5 sm:p-3 shadow-xs">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
             
@@ -340,7 +437,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Quick Helper Note for Mobile */}
+            {/* Quick Live Net Total Display */}
             <div className="text-[11px] text-slate-500 flex items-center gap-1">
               <span>الإجمالي الحالي:</span>
               <span className="font-extrabold text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
@@ -352,12 +449,12 @@ export default function App() {
         </div>
 
         {/* =========================================================================
-            THE SYSTEM INVOICE DOCUMENT (زي السيستم تماماً - A4 System Invoice Layout)
+            THE SYSTEM INVOICE DOCUMENT (زي السيستم تماماً)
            ========================================================================= */}
         <div
           ref={invoiceRef}
           id="printable-invoice"
-          className="invoice-paper bg-white border border-slate-300 rounded-xl shadow-md p-4 sm:p-6 md:p-8 text-slate-900 print:shadow-none print:border-none print:p-0 print:rounded-none"
+          className="invoice-paper bg-white border border-slate-300 rounded-xl shadow-md p-4 sm:p-6 md:p-8 text-slate-900"
         >
           {/* System Top Header */}
           <div className="border-b-2 border-slate-800 pb-3 sm:pb-4 mb-4">
@@ -390,7 +487,7 @@ export default function App() {
           </div>
 
           {/* System Metadata Bar (رقم الفاتورة، التاريخ، اسم البائع/المشتري) */}
-          <div className="bg-slate-50 print-bg-slate border border-slate-300 rounded-lg p-2.5 sm:p-3 mb-4 text-xs">
+          <div className="bg-slate-50 border border-slate-300 rounded-lg p-2.5 sm:p-3 mb-4 text-xs">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               
               {/* Invoice Number */}
@@ -450,7 +547,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* =================== SYSTEM ITEMS TABLE (زي السيستم تماماً) =================== */}
+          {/* =================== SYSTEM ITEMS TABLE =================== */}
           <div className="mb-3 overflow-x-auto border border-slate-300 rounded-lg bg-white shadow-2xs">
             <table className="w-full text-right border-collapse text-[11px] sm:text-xs">
               <thead>
@@ -467,7 +564,7 @@ export default function App() {
                 {invoice.items.map((item, index) => (
                   <tr
                     key={item.id}
-                    className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/70 print-bg-slate'}
+                    className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'}
                   >
                     <td className="py-1.5 px-1 text-center font-bold text-slate-500 border-l border-slate-200 text-[10px] sm:text-xs">
                       {index + 1}
@@ -543,7 +640,7 @@ export default function App() {
             </table>
           </div>
 
-          {/* Add Item Button Row (Screen only) */}
+          {/* Add Item Button Row */}
           <div className="no-print mb-4">
             <button
               type="button"
@@ -560,7 +657,7 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-12">
               
               {/* Right section: Tafqeet & Notes */}
-              <div className="md:col-span-7 p-3 bg-slate-50 print-bg-slate border-b md:border-b-0 md:border-l border-slate-300 space-y-2 text-xs">
+              <div className="md:col-span-7 p-3 bg-slate-50 border-b md:border-b-0 md:border-l border-slate-300 space-y-2 text-xs">
                 <div>
                   <span className="block text-[10px] font-extrabold text-slate-500 mb-0.5">
                     المبلغ الإجمالي بالحروف (تفقيط معتمد):
@@ -643,43 +740,48 @@ export default function App() {
             </div>
           </div>
 
-          {/* System Footer Note (No signatures, official system seal style) */}
+          {/* System Footer Note */}
           <div className="pt-2 text-center text-[10px] text-slate-500 border-t border-slate-200 flex flex-wrap items-center justify-between gap-1">
-            <span>فاتورة معتمدة صادرة إلكترونياً - نظام فواتير أيمن نصحي</span>
-            <span>تاريخ الطباعة: {invoice.invoiceDate}</span>
+            <span>فاتورة تجارية معتمدة - نظام فواتير أيمن نصحي</span>
+            <span>تاريخ الإصدار: {invoice.invoiceDate}</span>
           </div>
 
         </div>
 
-        {/* Bottom Floating Bar on Mobile (تنزيل PDF فوري بلمسة واحدة) - Hidden in Print */}
+        {/* Bottom Floating Bar on Mobile (تنزيل فوري مباشر للملف بلمسة واحدة) */}
         <div className="no-print fixed bottom-0 left-0 right-0 p-3 bg-white/95 backdrop-blur-md border-t border-slate-200 z-30 sm:hidden shadow-lg flex items-center gap-2">
           <button
             onClick={handleDownloadPdf}
-            disabled={isGeneratingPdf}
+            disabled={isGeneratingPdf || isGeneratingImage}
             type="button"
             className="cursor-pointer flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition disabled:opacity-75"
           >
             {isGeneratingPdf ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>جاري تنزيل الفاتورة...</span>
+                <span>جاري تحميل الملف...</span>
               </>
             ) : (
               <>
                 <Download className="w-4 h-4" />
-                <span>تنزيل الفاتورة PDF تلقائياً</span>
+                <span>تحميل الفاتورة PDF مباشرة</span>
               </>
             )}
           </button>
 
           <button
-            onClick={handlePrint}
+            onClick={handleDownloadImage}
+            disabled={isGeneratingPdf || isGeneratingImage}
             type="button"
-            className="cursor-pointer py-2.5 px-3 bg-slate-900 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1 active:scale-95 transition"
-            title="طباعة"
+            className="cursor-pointer py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1 active:scale-95 transition disabled:opacity-75"
+            title="تحميل كصورة"
           >
-            <Printer className="w-4 h-4" />
-            <span>طباعة</span>
+            {isGeneratingImage ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <ImageIcon className="w-4 h-4" />
+            )}
+            <span>صورة PNG</span>
           </button>
         </div>
 
