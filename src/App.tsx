@@ -10,7 +10,7 @@ import {
   Loader2,
   Image as ImageIcon,
 } from 'lucide-react';
-import html2canvas from 'html2canvas';
+import { toJpeg, toPng } from 'html-to-image';
 import jsPDF from 'jspdf';
 import { InvoiceData, InvoiceItem } from './types/invoice';
 import { numberToArabicWords } from './utils/tafqeet';
@@ -165,62 +165,63 @@ export default function App() {
     setTimeout(() => setNoticeMessage(null), 5000);
   };
 
-  // Helper to capture the invoice as a pristine, high-resolution canvas
-  const captureInvoiceCanvas = async (): Promise<HTMLCanvasElement | null> => {
-    if (!invoiceRef.current) return null;
-    const element = invoiceRef.current;
+  // Helper to trigger direct browser file download
+  const triggerBrowserDownload = (url: string, filename: string) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      document.body.removeChild(link);
+    }, 1500);
+  };
 
-    return await html2canvas(element, {
-      scale: 2.5,
-      useCORS: true,
-      allowTaint: true,
-      logging: false,
-      backgroundColor: '#ffffff',
-      onclone: (clonedDoc) => {
-        const clonedElement = clonedDoc.getElementById('printable-invoice');
-        if (clonedElement) {
-          // Standard A4 width at 96 DPI is 794px. Locking width ensures perfect proportion on all devices (mobile & PC)
-          clonedElement.style.width = '794px';
-          clonedElement.style.maxWidth = '794px';
-          clonedElement.style.minWidth = '794px';
-          clonedElement.style.boxSizing = 'border-box';
-          clonedElement.style.padding = '24px';
-          clonedElement.style.backgroundColor = '#ffffff';
-
-          // Convert all form inputs into pure typography so they render crisply without outlines
-          const inputs = clonedElement.querySelectorAll('input, textarea');
-          inputs.forEach((inp) => {
-            const inputEl = inp as HTMLInputElement | HTMLTextAreaElement;
-            const span = clonedDoc.createElement('span');
-            span.textContent = inputEl.value || '';
-            span.style.fontWeight = '700';
-            span.style.color = '#0f172a';
-            span.style.display = 'inline-block';
-            span.style.fontSize = 'inherit';
-            span.style.fontFamily = 'inherit';
-            inputEl.parentNode?.replaceChild(span, inputEl);
-          });
-
-          // Hide action icons and buttons
-          const noPrints = clonedElement.querySelectorAll('.no-print');
-          noPrints.forEach((el) => {
-            (el as HTMLElement).style.display = 'none';
-          });
-        }
-      },
+  // Sync inputs values to DOM attributes so SVG foreignObject captures current user inputs
+  const syncInputValuesToAttributes = (container: HTMLElement) => {
+    const inputs = container.querySelectorAll('input, textarea');
+    inputs.forEach((inp) => {
+      const inputEl = inp as HTMLInputElement | HTMLTextAreaElement;
+      inputEl.setAttribute('value', inputEl.value || '');
+      if (inputEl.tagName === 'TEXTAREA') {
+        inputEl.textContent = inputEl.value;
+      }
     });
   };
 
-  // Direct Automatic PDF Download (تحميل مباشر للملف دون أي نوافذ طباعة)
+  // Helper to capture the invoice cleanly using html-to-image (supports modern CSS and oklch natively)
+  const captureInvoiceDataUrl = async (type: 'jpeg' | 'png' = 'jpeg'): Promise<string> => {
+    if (!invoiceRef.current) throw new Error('عنصر الفاتورة غير موجود');
+    const element = invoiceRef.current;
+
+    // Sync input values
+    syncInputValuesToAttributes(element);
+
+    const options = {
+      backgroundColor: '#ffffff',
+      pixelRatio: 2.5,
+      filter: (node: Node) => {
+        if (node instanceof HTMLElement && node.classList?.contains('no-print')) {
+          return false;
+        }
+        return true;
+      },
+    };
+
+    if (type === 'png') {
+      return await toPng(element, options);
+    }
+    return await toJpeg(element, { ...options, quality: 0.96 });
+  };
+
+  // Direct Automatic PDF Download (تحميل مباشر للملف دون أي نوافذ طباعة ودون أي أخطاء ألوان)
   const handleDownloadPdf = async () => {
     if (isGeneratingPdf || isGeneratingImage) return;
     setIsGeneratingPdf(true);
 
     try {
-      const canvas = await captureInvoiceCanvas();
-      if (!canvas) throw new Error('Canvas capture failed');
+      const imgData = await captureInvoiceDataUrl('jpeg');
 
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
       const pdf = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
@@ -228,37 +229,38 @@ export default function App() {
       });
 
       const pdfWidth = 210; // A4 standard width (mm)
-      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+
+      // Calculate proportional height
+      const img = new Image();
+      img.src = imgData;
+      await new Promise((resolve) => {
+        img.onload = resolve;
+      });
+
+      const pdfHeight = (img.height * pdfWidth) / img.width;
 
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
 
       const fileName = `فاتورة_${invoice.invoiceType === 'sale' ? 'بيع' : 'شراء'}_ايمن_نصحي_${invoice.invoiceNumber || '001'}.pdf`;
 
-      // Trigger direct download
+      // 1. Direct jsPDF download
       pdf.save(fileName);
 
-      // Mobile anchor fallback to guarantee automatic file download
+      // 2. Extra fallback trigger for mobile browsers
       try {
         const blob = pdf.output('blob');
         const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = fileName;
-        document.body.appendChild(link);
-        link.click();
-        setTimeout(() => {
-          document.body.removeChild(link);
-          URL.revokeObjectURL(blobUrl);
-        }, 1500);
+        triggerBrowserDownload(blobUrl, fileName);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
       } catch {
-        // pdf.save already handled it
+        // pdf.save already completed
       }
 
-      showToast(`تم تنزيل الفاتورة مباشرة بنجاح: ${fileName}`);
+      showToast(`تم تنزيل الفاتورة PDF مباشرة: ${fileName}`);
     } catch (err) {
       console.error('Direct PDF download error:', err);
-      showToast('حدث خطأ أثناء تنزيل الفاتورة، جاري المحاولة كصورة عالية الدقة...');
-      handleDownloadImage();
+      showToast('جاري التنزيل كصورة عالية الدقة PNG...');
+      await handleDownloadImage();
     } finally {
       setIsGeneratingPdf(false);
     }
@@ -270,21 +272,10 @@ export default function App() {
     setIsGeneratingImage(true);
 
     try {
-      const canvas = await captureInvoiceCanvas();
-      if (!canvas) throw new Error('Canvas capture failed');
-
-      const imgData = canvas.toDataURL('image/png');
+      const imgData = await captureInvoiceDataUrl('png');
       const fileName = `فاتورة_${invoice.invoiceType === 'sale' ? 'بيع' : 'شراء'}_ايمن_نصحي_${invoice.invoiceNumber || '001'}.png`;
 
-      const link = document.createElement('a');
-      link.href = imgData;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        document.body.removeChild(link);
-      }, 1500);
-
+      triggerBrowserDownload(imgData, fileName);
       showToast(`تم تنزيل صورة الفاتورة مباشرة: ${fileName}`);
     } catch (err) {
       console.error('Direct Image download error:', err);
